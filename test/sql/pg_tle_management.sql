@@ -553,6 +553,92 @@ SELECT at_func();
 DROP EXTENSION "foo@bar";
 SELECT pgtle.uninstall_extension('foo@bar');
 
+-- pg_tle represents each extension artifact as a function whose name is
+-- derived from the extension name and version (e.g. "<name>.control" or
+-- "<name>--<version>.sql").  PostgreSQL truncates identifiers at NAMEDATALEN
+-- (63 bytes), so a derived name longer than that would collide with the
+-- extension's other artifacts once truncated.  These must be rejected up
+-- front rather than silently create colliding functions.
+
+-- An extension name that overflows the generated function name is rejected
+-- and nothing is created.
+SELECT pgtle.install_extension
+(
+ 'test9greaterthanNAMEDATALENNAMEDATALENNAMEDATALENNAMEDATALENNAMEDATALENNAMEDATALEN',
+ '0.1',
+ 'comment',
+ $_pgtle_$ SELECT 1; $_pgtle_$
+);
+SELECT count(*) AS leftover_funcs FROM pg_proc
+  WHERE pronamespace = 'pgtle'::regnamespace AND proname LIKE 'test9%';
+
+-- A long version on a short name overflows the "--<version>.sql" form and is
+-- likewise rejected, both via install_extension and install_extension_version.
+SELECT pgtle.install_extension
+(
+ 'shortname',
+ '012345678901234567890123456789012345678901234567890123456789',
+ 'comment',
+ $_pgtle_$ SELECT 1; $_pgtle_$
+);
+SELECT pgtle.install_extension('shortname', '1.0', 'comment', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.install_extension_version_sql
+(
+ 'shortname',
+ '012345678901234567890123456789012345678901234567890123456789',
+ $_pgtle_$ SELECT 1; $_pgtle_$
+);
+-- ... and the "--<from>--<to>.sql" update-path form too.
+SELECT pgtle.install_update_path
+(
+ 'shortname',
+ '1.0',
+ '012345678901234567890123456789012345678901234567890123456789',
+ $_pgtle_$ SELECT 1; $_pgtle_$
+);
+SELECT pgtle.uninstall_extension('shortname');
+
+-- A name at the limit (the generated ".sql" name is 63 bytes) still works.
+SELECT pgtle.install_extension
+(
+ 'n5456789012345678901234567890123456789012345678901234',
+ '1.0',
+ 'comment',
+ $_pgtle_$ SELECT 1; $_pgtle_$
+);
+SELECT name FROM pgtle.available_extensions()
+  WHERE name = 'n5456789012345678901234567890123456789012345678901234';
+SELECT pgtle.uninstall_extension('n5456789012345678901234567890123456789012345678901234');
+
+-- uninstall must not remove another extension whose name it is a prefix of, nor treat '_' as a wildcard
+-- set up a prefix target with an update path, a longer-named sibling, and an underscore decoy
+SELECT pgtle.install_extension('col_a', '1.0', 'prefix', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.install_extension_version_sql('col_a', '1.1', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.install_update_path('col_a', '1.0', '1.1', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.install_extension('col_a_b', '1.0', 'longer sibling', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.install_extension('col_axb', '1.0', 'underscore decoy', $_pgtle_$ SELECT 1; $_pgtle_$);
+
+-- prefix uninstall removes only col_a's artifacts; the sibling and decoy survive
+SELECT pgtle.uninstall_extension('col_a');
+SELECT name FROM pgtle.available_extensions()
+  WHERE name IN ('col_a', 'col_a_b', 'col_axb') ORDER BY name;
+
+-- the '_' in col_a_b must not act as a wildcard and sweep up col_axb
+SELECT pgtle.uninstall_extension('col_a_b');
+SELECT name FROM pgtle.available_extensions()
+  WHERE name IN ('col_a', 'col_a_b', 'col_axb') ORDER BY name;
+
+-- the (name, version) form drops the control function by exact name, not by prefix, so pfx_b survives
+SELECT pgtle.install_extension('pfx', '1.0', 'prefix2', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.install_extension('pfx_b', '1.0', 'sibling2', $_pgtle_$ SELECT 1; $_pgtle_$);
+SELECT pgtle.uninstall_extension('pfx', '1.0');
+SELECT name FROM pgtle.available_extensions()
+  WHERE name IN ('pfx', 'pfx_b') ORDER BY name;
+
+-- clean up the remaining collision-test artifacts
+SELECT pgtle.uninstall_extension('col_axb');
+SELECT pgtle.uninstall_extension('pfx_b');
+
 -- Skip TransactionStmts
 BEGIN;
 SELECT pgtle.available_extension_versions();
